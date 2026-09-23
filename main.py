@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import threading
 import urllib.request
 
@@ -45,7 +46,7 @@ RELEASE_URL = (
     "releases/download/model-v1/content_moderation_gpu.onnx.data"
 )
 
-app = FastAPI(title="Content Moderation Model", version="1.1.0")
+app = FastAPI(title="Content Moderation Model", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,6 +65,22 @@ vectorizer_error: str | None = None
 session = None
 model_error: str | None = None
 model_status = "initializing"  # initializing | downloading | ok | error
+
+# Deterministic profanity layer: the TF-IDF model is weak on very short texts
+# (e.g. a single abusive word scores 0.001), so explicitly abusive words are
+# always treated as toxic regardless of the model score.
+_PROFANITY_RE = re.compile(
+    r"\b(?:"
+    r"asshole|assholes|bastard|bastards|bitch|bitches|bullshit|crap|cunt|cunts|"
+    r"dick|dickhead|dickheads|dumbass|dumbasses|fag|faggot|faggots|fuck|fucked|"
+    r"fucker|fuckers|fucking|motherfucker|motherfuckers|prick|pricks|puny cock|"
+    r"retard|retarded|shit|shits|shithead|shitheads|shitty|slut|sluts|"
+    r"twat|wanker|wankers|whore|whores|chutiya|chutiye|madarchod|behenchod|"
+    r"bhosdike|bhen ke lode|gaandu|gandu|harami|kutta|kutte|haramkhor|"
+    r"randi|rand|saala harami"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 class ModerateRequest(BaseModel):
@@ -167,6 +184,14 @@ def health() -> dict:
 def moderate(req: ModerateRequest) -> dict:
     if vectorizer is None:
         raise HTTPException(status_code=503, detail=f"Vectorizer unavailable: {vectorizer_error}")
+    if _PROFANITY_RE.search(req.text):
+        return {
+            "text_length": len(req.text),
+            "toxic": True,
+            "score": 1.0,
+            "label": "toxic",
+            "matched_rule": "profanity_list",
+        }
     if session is None:
         raise HTTPException(
             status_code=503,
