@@ -61,7 +61,7 @@ Trained in a Kaggle GPU notebook (PyTorch), then exported to ONNX:
 | Vectorizer | `TfidfVectorizer(max_features=30_000, ngram_range=(1, 2))`, scikit-learn 1.6.1 |
 | Architecture | `fc1` Linear 30000→256 → ReLU → Dropout(0.3) → `fc2` Linear 256→1 → Sigmoid |
 | Objective | `BCELoss`, Adam optimizer (lr=0.005), 3 epochs |
-| Final train loss | ~0.178 |
+| Loss per epoch | 0.178 → 0.137 → 0.105 (3 epochs, final) |
 | Held-out accuracy | 94.4% |
 | Export | `torch.onnx.export` (external weights) + `joblib.dump(vectorizer)` |
 
