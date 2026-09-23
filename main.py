@@ -8,15 +8,21 @@ and exposes:
   GET  /         -> service health + model status
   POST /moderate -> {"text": "..."} -> toxicity score
 
-The server starts even if the model is broken (e.g. truncated .onnx.data
-file) so the deployment goes live and the problem is visible in /health
-and in the logs; /moderate returns 503 until the model loads.
+The 29.4 MB weights file is shipped as a GitHub release asset (the copy
+committed to git was truncated at 4 MiB). On startup, if the local copy is
+missing or too small, it is downloaded automatically in a background
+thread — the web server binds its port immediately, so Render's health
+check passes even while the download is in flight. /moderate returns 503
+until the model finishes loading.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import threading
+import urllib.request
 
 import joblib
 import numpy as np
@@ -33,8 +39,13 @@ VECTORIZER_PATH = "tfidf_vectorizer.pkl"
 # Required size of the external weights file, computed from the ONNX graph:
 # fc1.bias (1024) + fc2.weight (1024) + fc1.weight (30,720,000) + 65,536 offset.
 EXPECTED_DATA_SIZE = 30_785_536
+EXPECTED_SHA256 = "67a0c7e79e86d6bfc488b6dcb83b16a02fd929f91afe4c9fdd837d75d829a489"
+RELEASE_URL = (
+    "https://github.com/Vishalkumar-acad/Content-Moderation-Model/"
+    "releases/download/model-v1/content_moderation_gpu.onnx.data"
+)
 
-app = FastAPI(title="Content Moderation Model", version="1.0.0")
+app = FastAPI(title="Content Moderation Model", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +63,7 @@ vectorizer = None
 vectorizer_error: str | None = None
 session = None
 model_error: str | None = None
+model_status = "initializing"  # initializing | downloading | ok | error
 
 
 class ModerateRequest(BaseModel):
@@ -69,25 +81,68 @@ def load_vectorizer() -> None:
         log.exception("Failed to load vectorizer")
 
 
-def load_model() -> None:
+def _local_data_ok() -> bool:
+    try:
+        return os.path.getsize(DATA_PATH) >= EXPECTED_DATA_SIZE
+    except OSError:
+        return False
+
+
+def _try_load_model() -> bool:
+    """Load the ONNX session from the local files. Returns True on success."""
     global session, model_error
     try:
-        actual = os.path.getsize(DATA_PATH) if os.path.exists(DATA_PATH) else 0
-        if actual < EXPECTED_DATA_SIZE:
-            raise RuntimeError(
-                f"{DATA_PATH} is truncated: {actual} bytes present, "
-                f"{EXPECTED_DATA_SIZE} bytes required (the original upload "
-                "stopped at exactly 4 MiB). Re-upload the full file."
-            )
         import onnxruntime as ort
 
-        session = ort.InferenceSession(
-            MODEL_PATH, providers=["CPUExecutionProvider"]
-        )
+        session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+        model_error = None
         log.info("Loaded %s", MODEL_PATH)
+        return True
     except Exception as exc:  # noqa: BLE001
+        session = None
         model_error = f"{type(exc).__name__}: {exc}"
         log.error("Model not available: %s", model_error)
+        return False
+
+
+def _download_and_load() -> None:
+    global model_status, model_error
+    model_status = "downloading"
+    try:
+        log.info("Downloading model weights from release asset (%d bytes)...", EXPECTED_DATA_SIZE)
+        tmp_path = DATA_PATH + ".tmp"
+        urllib.request.urlretrieve(RELEASE_URL, tmp_path)
+        size = os.path.getsize(tmp_path)
+        if size != EXPECTED_DATA_SIZE:
+            raise RuntimeError(f"downloaded file is {size} bytes, expected {EXPECTED_DATA_SIZE}")
+        with open(tmp_path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        if digest != EXPECTED_SHA256:
+            raise RuntimeError(f"sha256 mismatch: got {digest}")
+        os.replace(tmp_path, DATA_PATH)
+        log.info("Weights downloaded and verified (sha256 ok).")
+        if _try_load_model():
+            model_status = "ok"
+        else:
+            model_status = "error"
+    except Exception as exc:  # noqa: BLE001
+        model_error = f"{type(exc).__name__}: {exc}"
+        model_status = "error"
+        log.error("Weight download failed: %s", model_error)
+
+
+def load_model() -> None:
+    global model_status
+    if _local_data_ok() and _try_load_model():
+        model_status = "ok"
+        return
+    if not _local_data_ok():
+        log.warning(
+            "%s missing or truncated (git copy was cut at 4 MiB); "
+            "fetching full file from the GitHub release in the background.",
+            DATA_PATH,
+        )
+        threading.Thread(target=_download_and_load, daemon=True).start()
 
 
 load_vectorizer()
@@ -101,6 +156,7 @@ def health() -> dict:
         "status": "ok" if (vectorizer is not None and session is not None) else "degraded",
         "vectorizer_loaded": vectorizer is not None,
         "model_loaded": session is not None,
+        "model_status": model_status,
         "vectorizer_error": vectorizer_error,
         "model_error": model_error,
         "expected_data_bytes": EXPECTED_DATA_SIZE,
@@ -112,11 +168,14 @@ def moderate(req: ModerateRequest) -> dict:
     if vectorizer is None:
         raise HTTPException(status_code=503, detail=f"Vectorizer unavailable: {vectorizer_error}")
     if session is None:
-        raise HTTPException(status_code=503, detail=f"Model unavailable: {model_error}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Model unavailable ({model_status}): {model_error}",
+        )
 
     features = vectorizer.transform([req.text]).toarray().astype(np.float32)
-    (logit,) = session.run(["output"], {"input": features})
-    score = float(1.0 / (1.0 + np.exp(-float(logit[0][0]))))  # sigmoid
+    (prob,) = session.run(["output"], {"input": features})
+    score = float(prob[0][0])  # graph already ends with Sigmoid — this is the probability
     return {
         "text_length": len(req.text),
         "toxic": score >= 0.5,
