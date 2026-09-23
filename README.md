@@ -4,7 +4,7 @@
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg)
 ![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)
 
-A lightweight, fast content-moderation model for real-time comment and post moderation. A TF-IDF + MLP classifier trained on ~1.75 million public toxic-comment conversations, exported to ONNX for fast CPU inference and served through a small FastAPI service.
+A lightweight, fast content-moderation model for real-time comment and post moderation. A TF-IDF + MLP classifier trained on 1.8M public comment conversations from the Jigsaw/Civil Comments toxicity dataset, exported to ONNX for fast CPU inference and served through a small FastAPI service.
 
 ## How it works — two layers
 
@@ -51,21 +51,36 @@ curl -X POST http://localhost:8000/moderate \
 no large files need to be in the git tree. On Render's free plan the instance
 sleeps when idle; the first request after idle takes ~50 s to wake up.
 
+## Training
+
+Trained in a Kaggle GPU notebook (PyTorch), then exported to ONNX:
+
+| | |
+|---|---|
+| Dataset | [SetFit/toxic_conversations](https://huggingface.co/datasets/SetFit/toxic_conversations) — 1,804,874 comments (~8% toxic) |
+| Vectorizer | `TfidfVectorizer(max_features=30_000, ngram_range=(1, 2))`, scikit-learn 1.6.1 |
+| Architecture | `fc1` Linear 30000→256 → ReLU → Dropout(0.3) → `fc2` Linear 256→1 → Sigmoid |
+| Objective | `BCELoss`, Adam optimizer (lr=0.005), 3 epochs |
+| Final train loss | ~0.178 |
+| Held-out accuracy | 94.4% |
+| Export | `torch.onnx.export` (external weights) + `joblib.dump(vectorizer)` |
+
 ## Model details
 
 | | |
 |---|---|
 | Architecture | TF-IDF (30,000 features) → Gemm fc1 (30000→256) → ReLU → Gemm fc2 (256→1) → Sigmoid |
-| Held-out accuracy | 94.4% |
 | Size | 5 KB graph + 30,785,536 bytes external weights (~29 MB) |
-| Vectorizer | scikit-learn 1.6.1 TfidfVectorizer (30,000 features) |
 | Inference | ONNX Runtime (CPU), milliseconds per request |
 
 ## Dataset & attribution
 
-Trained on ~1.75 million public toxic-comment conversations from a
-CC BY 4.0 licensed public dataset. If you fork or reuse this model, please
-also respect the underlying dataset's attribution requirements.
+The training data is a version of the [Jigsaw Unintended Bias in Toxicity
+Classification](https://www.kaggle.com/c/jigsaw-unintended-bias-in-toxicity-classification)
+dataset (Civil Comments platform), via
+[SetFit/toxic_conversations](https://huggingface.co/datasets/SetFit/toxic_conversations),
+licensed **CC BY 4.0**. If you fork or reuse this model, please keep this
+attribution intact.
 
 ## License
 
