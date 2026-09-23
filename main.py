@@ -46,7 +46,7 @@ RELEASE_URL = (
     "releases/download/model-v1/content_moderation_gpu.onnx.data"
 )
 
-app = FastAPI(title="Content Moderation Model", version="1.2.0")
+app = FastAPI(title="Content Moderation Model", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,6 +81,31 @@ _PROFANITY_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+# Deterministic harassment-phrase layer: politely-worded harassment
+# ("nobody cares about your existence") contains no profanity, so the TF-IDF
+# model scores it ~0.0005 — deep in "clean" territory, far below any usable
+# threshold. Common harassment phrasings are therefore matched explicitly too.
+_HARASSMENT_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b(?:nobody|no\s?one|none)\s+(?:cares?|liked|likes|loves?|misses|wants|needs|asked)\s+(?:about\s+|for\s+)?(?:you|u|your|ur)\b",
+        r"\b(?:nobody|no\s?one)\s+would\s+(?:even\s+)?(?:miss|notice|remember|care)\s+(?:you|u)\b",
+        r"\b(?:world|planet|everyone|everybody)\s+would\s+be\s+better\s+(?:off\s+)?without\s+(?:you|u)\b",
+        r"\b(?:everyone|everybody|all)\s+(?:hates|hate)\s+(?:you|u)\b",
+        r"\bwaste\s+of\s+(?:oxygen|air|space)\b",
+        r"\bkill\s+(?:yourself|urself)\b|\bkys\b|\bunalive\s+(?:yourself|urself)\b|\bend\s+(?:your|ur)\s+life\b",
+        r"\bgo\s+die\b|\bdrop\s+dead\b|\b(?:you|u)\s+(?:should|deserve)\s+(?:to\s+)?die\b|\bdeserve\s+to\s+die\b",
+        r"\b(?:you\s+are|you'?re|u\s+are)\s+(?:so\s+|such\s+)?(?:a\s+|an\s+)?(?:worthless|pathetic|useless|disgusting|repulsive|mistake|trash|garbage|shameful)\b",
+        r"\byou\s+should\s+be\s+ashamed\b",
+        r"\bwhy\s+don'?t\s+you\s+(?:just\s+)?(?:stop|quit|leave|disappear|go\s+away)\b",
+        r"\bdo\s+(?:us|me)\s+a\s+favor\b[^.!?]{0,60}?\b(?:stop|quit|leave|disappear|die|delete)\b",
+        r"\bnobody\s+asked\s+(?:you|u)\b",
+        r"\bshouldn'?t\s+(?:exist|be\s+alive|be\s+born)\b",
+        r"\bdon'?t\s+deserve\s+(?:to\s+live|life|anything|friends|love)\b",
+        r"\b(?:your|ur)\s+(?:writing|posts?|content|art|work|existence|opinions?)\s+(?:is|are)\s+(?:garbage|trash|worthless|pathetic|pointless|useless)\b",
+    )
+]
 
 
 class ModerateRequest(BaseModel):
@@ -191,6 +216,14 @@ def moderate(req: ModerateRequest) -> dict:
             "score": 1.0,
             "label": "toxic",
             "matched_rule": "profanity_list",
+        }
+    if any(r.search(req.text) for r in _HARASSMENT_RES):
+        return {
+            "text_length": len(req.text),
+            "toxic": True,
+            "score": 1.0,
+            "label": "toxic",
+            "matched_rule": "harassment_pattern",
         }
     if session is None:
         raise HTTPException(
