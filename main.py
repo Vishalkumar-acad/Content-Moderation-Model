@@ -8,9 +8,10 @@ and exposes:
   GET  /         -> service health + model status
   POST /moderate -> {"text": "..."} -> toxicity score
 
-The 29.4 MB weights file is shipped as a GitHub release asset (the copy
-committed to git was truncated at 4 MiB). On startup, if the local copy is
-missing or too small, it is downloaded automatically in a background
+The v2 weights (30 MB) and the v2 TF-IDF vectorizer are shipped as GitHub
+release assets (model-v2). On startup, every file is verified against its
+exact size and sha256; anything missing, truncated or stale (e.g. a v1
+copy) is re-downloaded automatically - the weights in a background
 thread — the web server binds its port immediately, so Render's health
 check passes even while the download is in flight. /moderate returns 503
 until the model finishes loading.
@@ -40,13 +41,15 @@ VECTORIZER_PATH = "tfidf_vectorizer.pkl"
 # Required size of the external weights file, computed from the ONNX graph:
 # fc1.bias (1024) + fc2.weight (1024) + fc1.weight (30,720,000) + 65,536 offset.
 EXPECTED_DATA_SIZE = 30_785_536
-EXPECTED_SHA256 = "67a0c7e79e86d6bfc488b6dcb83b16a02fd929f91afe4c9fdd837d75d829a489"
-RELEASE_URL = (
+EXPECTED_SHA256 = "736f23b4fef8a231ad2e1589561840be0d997e214848be6e27589376aa402bda"
+RELEASE_BASE_URL = (
     "https://github.com/Vishalkumar-acad/Content-Moderation-Model/"
-    "releases/download/model-v1/content_moderation_gpu.onnx.data"
+    "releases/download/model-v2/"
 )
+VECTORIZER_SIZE = 1_159_880
+VECTORIZER_SHA256 = "82d209ce61c18a5e0bbf75ec3abf22b97657a89f64452a2601c6b537c9a00205"
 
-app = FastAPI(title="Content Moderation Model", version="1.3.0")
+app = FastAPI(title="Content Moderation Model", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -115,6 +118,9 @@ class ModerateRequest(BaseModel):
 def load_vectorizer() -> None:
     global vectorizer, vectorizer_error
     try:
+        if not _file_ok(VECTORIZER_PATH, VECTORIZER_SIZE, VECTORIZER_SHA256):
+            log.info("Fetching %s from release (missing or outdated)...", VECTORIZER_PATH)
+            _download_verified(VECTORIZER_PATH, VECTORIZER_SIZE, VECTORIZER_SHA256)
         vectorizer = joblib.load(VECTORIZER_PATH)
         n = len(getattr(vectorizer, "vocabulary_", {}))
         log.info("Loaded %s (vocabulary: %d features)", VECTORIZER_PATH, n)
@@ -123,11 +129,30 @@ def load_vectorizer() -> None:
         log.exception("Failed to load vectorizer")
 
 
-def _local_data_ok() -> bool:
+def _file_ok(path: str, size: int, sha256: str) -> bool:
+    """True only if the local file exists with the exact size and sha256."""
     try:
-        return os.path.getsize(DATA_PATH) >= EXPECTED_DATA_SIZE
+        if os.path.getsize(path) != size:
+            return False
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest() == sha256
     except OSError:
         return False
+
+
+def _download_verified(path: str, size: int, sha256: str) -> None:
+    """Download `path` from the model-v2 release, verify size+sha, move into place."""
+    url = RELEASE_BASE_URL + path
+    tmp_path = path + ".tmp"
+    urllib.request.urlretrieve(url, tmp_path)
+    got = os.path.getsize(tmp_path)
+    if got != size:
+        raise RuntimeError(f"downloaded {path} is {got} bytes, expected {size}")
+    with open(tmp_path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    if digest != sha256:
+        raise RuntimeError(f"sha256 mismatch for {path}: got {digest}")
+    os.replace(tmp_path, path)
 
 
 def _try_load_model() -> bool:
@@ -152,16 +177,7 @@ def _download_and_load() -> None:
     model_status = "downloading"
     try:
         log.info("Downloading model weights from release asset (%d bytes)...", EXPECTED_DATA_SIZE)
-        tmp_path = DATA_PATH + ".tmp"
-        urllib.request.urlretrieve(RELEASE_URL, tmp_path)
-        size = os.path.getsize(tmp_path)
-        if size != EXPECTED_DATA_SIZE:
-            raise RuntimeError(f"downloaded file is {size} bytes, expected {EXPECTED_DATA_SIZE}")
-        with open(tmp_path, "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()
-        if digest != EXPECTED_SHA256:
-            raise RuntimeError(f"sha256 mismatch: got {digest}")
-        os.replace(tmp_path, DATA_PATH)
+        _download_verified(DATA_PATH, EXPECTED_DATA_SIZE, EXPECTED_SHA256)
         log.info("Weights downloaded and verified (sha256 ok).")
         if _try_load_model():
             model_status = "ok"
@@ -175,10 +191,10 @@ def _download_and_load() -> None:
 
 def load_model() -> None:
     global model_status
-    if _local_data_ok() and _try_load_model():
+    if _file_ok(DATA_PATH, EXPECTED_DATA_SIZE, EXPECTED_SHA256) and _try_load_model():
         model_status = "ok"
         return
-    if not _local_data_ok():
+    if not _file_ok(DATA_PATH, EXPECTED_DATA_SIZE, EXPECTED_SHA256):
         log.warning(
             "%s missing or truncated (git copy was cut at 4 MiB); "
             "fetching full file from the GitHub release in the background.",
