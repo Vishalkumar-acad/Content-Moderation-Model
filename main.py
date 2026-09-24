@@ -49,7 +49,7 @@ RELEASE_BASE_URL = (
 VECTORIZER_SIZE = 1_159_880
 VECTORIZER_SHA256 = "82d209ce61c18a5e0bbf75ec3abf22b97657a89f64452a2601c6b537c9a00205"
 
-app = FastAPI(title="Content Moderation Model", version="1.4.0")
+app = FastAPI(title="Content Moderation Model", version="1.4.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,10 +75,11 @@ model_status = "initializing"  # initializing | downloading | ok | error
 _PROFANITY_RE = re.compile(
     r"\b(?:"
     r"asshole|assholes|bastard|bastards|bitch|bitches|bullshit|crap|cunt|cunts|"
-    r"dick|dickhead|dickheads|dumbass|dumbasses|fag|faggot|faggots|fuck|fucked|"
-    r"fucker|fuckers|fucking|motherfucker|motherfuckers|prick|pricks|puny cock|"
-    r"retard|retarded|shit|shits|shithead|shitheads|shitty|slut|sluts|"
-    r"twat|wanker|wankers|whore|whores|chutiya|chutiye|madarchod|behenchod|"
+    r"dick|dickhead|dickheads|dumbass|dumbasses|assclown|assclowns|fag|faggot|"
+    r"faggots|fuck|fucked|fucker|fuckers|fucking|motherfucker|motherfuckers|"
+    r"prick|pricks|puny cock|retard|retarded|shit|shits|shithead|shitheads|"
+    r"shitty|horseshit|slut|sluts|twat|scumbag|scumbags|nigger|niggas|nigga|"
+    r"wanker|wankers|whore|whores|chutiya|chutiye|madarchod|behenchod|"
     r"bhosdike|bhen ke lode|gaandu|gandu|harami|kutta|kutte|haramkhor|"
     r"randi|rand|saala harami"
     r")\b",
