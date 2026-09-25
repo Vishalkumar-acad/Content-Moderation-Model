@@ -1,5 +1,5 @@
-fastapi
-uvicorn[standard]
-onnxruntime
-tokenizers
-numpy
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+onnxruntime>=1.20,<2.0
+tokenizers>=0.19,<1.0
+numpy>=1.26,<3.0

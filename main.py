@@ -2,8 +2,10 @@
 Content Moderation Model — FastAPI inference server (for Render.com).
 
 v3 pipeline (DistilBERT deep learning):
-  1. profanity wordlist (deterministic, v1.4.1)
-  2. harassment-phrase regex (deterministic)
+  1. profanity wordlist (deterministic, v1.4.1) — with de-obfuscation
+     normalization (leetspeak, fullwidth/homoglyphs, elongation, spaced
+     single letters, zero-width chars)
+  2. harassment-phrase regex (deterministic) — same normalization
   3. DistilBERT int8 ONNX model (tokenizers + onnxruntime)
 
 The model (67 MB), tokenizer.json and tokenizer_config.json are shipped as
@@ -22,6 +24,7 @@ import logging
 import os
 import re
 import threading
+import unicodedata
 import urllib.request
 
 import numpy as np
@@ -47,7 +50,7 @@ RELEASE_BASE_URL = (
 )
 MAX_LEN = 128
 
-app = FastAPI(title="Content Moderation Model", version="1.5.0")
+app = FastAPI(title="Content Moderation Model", version="1.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,7 +93,7 @@ _PROFANITY_RE = re.compile(
 _HARASSMENT_RES = [
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:nobody|no\s?one|none)\s+(?:cares?|liked|likes|loves?|misses|wants|needs|asked)\s+(?:about\s+|for\s+)?(?:you|u|your|ur)\b",
+        r"\b(?:nobody|no\s?one|none)\s+(?:cares?|liked|likes|loves?|misses|wants|needs|asked)\s+(?:about\s+|for\s+)?(?:you|u|ur)\b",
         r"\b(?:nobody|no\s?one)\s+would\s+(?:even\s+)?(?:miss|notice|remember|care)\s+(?:you|u)\b",
         r"\b(?:world|planet|everyone|everybody)\s+would\s+be\s+better\s+(?:off\s+)?without\s+(?:you|u)\b",
         r"\b(?:everyone|everybody|all)\s+(?:hates|hate)\s+(?:you|u)\b",
@@ -107,6 +110,43 @@ _HARASSMENT_RES = [
         r"\b(?:your|ur)\s+(?:writing|posts?|content|art|work|existence|opinions?)\s+(?:is|are)\s+(?:garbage|trash|worthless|pathetic|pointless|useless)\b",
     )
 ]
+
+# --- De-obfuscation normalization (deterministic layers only) ---------------
+# The wordlist and harassment regexes are matched against BOTH the original
+# text and a normalized copy, so common evasion tricks still get caught:
+#   "sh1t", "f u c k", "ｆｕｃｋ" (fullwidth), "fuuuuck", zero-width padding.
+# The transformer always receives the ORIGINAL text (it was trained on real
+# text; normalized input would shift its scores unpredictably).
+_LEET_MAP = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+    "@": "a", "$": "s", "!": "i", "+": "t",
+})
+_ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")
+# a run of 3+ whitespace-separated 1-2 char tokens: "f u c k", "sh i i t" -> "fuck", "shiit"
+_SPACED_RUN_RE = re.compile(r"\b\w{1,2}\b(?:\s+\b\w{1,2}\b)+")
+# collapse 3+ repeats of a char ("fuuuck"->"fuck"); 2-char doubles like the
+# "ss" in "asshole" or "ll" in "kill" must be preserved in the standard
+# variant or the patterns themselves would stop matching
+_ELONGATION_RE = re.compile(r"(.)\1{2,}")
+# the aggressive variant additionally collapses 2-char doubles
+# ("shiit"->"shit"); double-letter words like "asshole" are still caught on
+# the original/standard variants, so this only adds coverage
+_ELONGATION_RE_AGGRESSIVE = re.compile(r"(.)\1+")
+
+
+def _deobfuscate(text: str) -> str:
+    """Normalize common obfuscation tricks for deterministic-layer matching."""
+    t = unicodedata.normalize("NFKC", text).lower()
+    t = _ZERO_WIDTH_RE.sub("", t)
+    t = t.translate(_LEET_MAP)
+    t = _SPACED_RUN_RE.sub(lambda m: re.sub(r"\s+", "", m.group(0)), t)
+    t = _ELONGATION_RE.sub(r"\1", t)
+    return t
+
+
+def _deobfuscate_aggressive(norm: str) -> str:
+    """Extra pass for spacing+elongation combos ("sh i i t" -> "shit")."""
+    return _ELONGATION_RE_AGGRESSIVE.sub(r"\1", norm)
 
 
 class ModerateRequest(BaseModel):
@@ -225,7 +265,7 @@ load_model()
 def health() -> dict:
     return {
         "service": "content-moderation-model",
-        "version": "1.5.0 (DistilBERT v3)",
+        "version": "1.6.0 (DistilBERT v3)",
         "status": "ok" if (tokenizer is not None and session is not None) else "degraded",
         "tokenizer_loaded": tokenizer is not None,
         "model_loaded": session is not None,
@@ -237,22 +277,26 @@ def health() -> dict:
 
 @app.post("/moderate")
 def moderate(req: ModerateRequest) -> dict:
-    if _PROFANITY_RE.search(req.text):
-        return {
-            "text_length": len(req.text),
-            "toxic": True,
-            "score": 1.0,
-            "label": "toxic",
-            "matched_rule": "profanity_list",
-        }
-    if any(r.search(req.text) for r in _HARASSMENT_RES):
-        return {
-            "text_length": len(req.text),
-            "toxic": True,
-            "score": 1.0,
-            "label": "toxic",
-            "matched_rule": "harassment_pattern",
-        }
+    # Deterministic layers run on the original text plus two de-obfuscated
+    # variants, so "sh1t" / "f u c k" / "sh i i t" / "ｆｕｃｋ" are caught too.
+    norm = _deobfuscate(req.text)
+    for variant in (req.text, norm, _deobfuscate_aggressive(norm)):
+        if _PROFANITY_RE.search(variant):
+            return {
+                "text_length": len(req.text),
+                "toxic": True,
+                "score": 1.0,
+                "label": "toxic",
+                "matched_rule": "profanity_list",
+            }
+        if any(r.search(variant) for r in _HARASSMENT_RES):
+            return {
+                "text_length": len(req.text),
+                "toxic": True,
+                "score": 1.0,
+                "label": "toxic",
+                "matched_rule": "harassment_pattern",
+            }
     if session is None or tokenizer is None:
         raise HTTPException(
             status_code=503,
