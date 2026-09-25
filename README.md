@@ -148,7 +148,13 @@ as a rollback.
 ## v1 — original (historical)
 
 TF-IDF (30,000 features) → Linear 30000→256 → ReLU → Linear 256→1 →
-Sigmoid. Held-out accuracy 94.4%.
+Sigmoid. Held-out accuracy 94.4%. The complete v1 snapshot (code +
+vectorizer) lives at the
+[`model-v1` tag](https://github.com/Vishalkumar-acad/Content-Moderation-Model/tree/model-v1),
+and its full weights are published as the
+[model-v1 release](https://github.com/Vishalkumar-acad/Content-Moderation-Model/releases/tag/model-v1)
+asset (the copy once committed to the git tree was a truncated 4 MiB
+upload, so the release asset is the real one).
 
 ## Files in this repo
 
