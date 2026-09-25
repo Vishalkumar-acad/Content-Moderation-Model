@@ -98,6 +98,20 @@ user reports:
 The v1.4.1 wordlist update additionally catches (score 1.0):
 nigger/niggas/nigga, horseshit (word-boundary fix), assclown, scumbag.
 
+### Independent evaluation (20,000 fresh civil comments, never seen in training)
+
+| | v1 | v2 model-only | v2 full pipeline |
+|---|---|---|---|
+| Accuracy | ~95.7% | **99.11%** | **98.89%** |
+| AUC | ~0.978 | **0.9858** | 0.9866 |
+| Missed toxic (FN) | 842 (4.21%) | **99 (0.50%)** | **97 (0.48%)** |
+| False positives | 13 | 80 (0.40%) | 124 (0.62%)* |
+
+\* The full pipeline also flags comments that contain profanity but were
+labeled non-toxic by the dataset (profanity != toxicity) — a deliberate
+policy choice. Most full-pipeline false positives land in the 0.5-0.9
+flag-only zone (admin review), not auto-hide (>= 0.9).
+
 ## Model details
 
 | | |
