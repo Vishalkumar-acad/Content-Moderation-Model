@@ -151,6 +151,25 @@ Sigmoid. Held-out accuracy 94.4%.
 | `tokenizer.json` | 711,661 | `da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0` |
 | `tokenizer_config.json` | 322 | `797ed9ba72b500001971b827b0040b8743def8ec38f9cd4cda4c4945734d3596` |
 
+**Optional higher-precision variant (fp16, 134 MB)** — same model in
+float16 instead of int8 (max score difference from the fp32 original:
+0.0024). Useful if you want to re-quantize yourself or avoid int8
+artifacts. Shipped as two parts because of the 100 MB asset limit:
+
+| File | Size | sha256 |
+|---|---|---|
+| `distilbert_moderation_v3_fp16.onnx.part00` | 67,038,759 | `8ad12afa5a0adf1a7d636ec6d572a1c13eca683c854bd0095c1f1ea7fd550a38` |
+| `distilbert_moderation_v3_fp16.onnx.part01` | 67,038,760 | `3d03bea5eba7fd5a3ac43b1bdba7eb7d506dc1e7d510d512da2ec429f95ecdd1` |
+
+Join the parts and verify:
+
+```bash
+cat distilbert_moderation_v3_fp16.onnx.part00 distilbert_moderation_v3_fp16.onnx.part01 > distilbert_moderation_v3_fp16.onnx
+# joined sha256: 5329703d8405fd90deccc4028b48c6b27f8122c1d553a36f30cb8fc03c591aba (134,077,519 bytes)
+```
+
+(Windows: `copy /b distilbert_moderation_v3_fp16.onnx.part00+distilbert_moderation_v3_fp16.onnx.part01 distilbert_moderation_v3_fp16.onnx`)
+
 ## Dataset & attribution
 
 The training data is a version of the [Jigsaw Unintended Bias in Toxicity
