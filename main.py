@@ -156,7 +156,7 @@ def _try_load_all() -> bool:
 
         session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
         # warmup so the first real request is fast
-        _predict("warmup: please take out out the garbage")
+        _predict("warmup: please take out the garbage")
         model_error = None
         log.info("Loaded tokenizer + %s (warmup ok)", MODEL_PATH)
         return True
