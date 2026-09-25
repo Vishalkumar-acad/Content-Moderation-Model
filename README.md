@@ -3,16 +3,17 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg)
 ![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)
+![DistilBERT](https://img.shields.io/badge/Model-DistilBERT%20int8-FF6F00.svg)
 
-A lightweight, fast content-moderation model for real-time comment and post moderation. A TF-IDF + MLP classifier trained on 1.75M public comment conversations from the Jigsaw/Civil Comments toxicity dataset, exported to ONNX for fast CPU inference and served through a small FastAPI service.
+A content-moderation model for real-time comment and post moderation, served through a small FastAPI service on CPU.
 
-**Current version: v2** — an 80/20 anti-forgetting retrain of the original model, trained on error-mined additions plus the full original dataset.
+**Current version: v3** — a fine-tuned **DistilBERT** transformer (int8-quantized ONNX, 67 MB) that understands context, replacing the v2 TF-IDF classifier. Trained on 1.75M public comment conversations from the Jigsaw/Civil Comments toxicity dataset.
 
 ## How it works — three layers
 
 1. **Profanity wordlist (deterministic):** common English and Hindi abusive words are always blocked instantly (score 1.0, `matched_rule: profanity_list`), regardless of the model's output. This covers very short texts where statistical models are weak.
 2. **Harassment-phrase patterns (deterministic):** politely-worded harassment ("nobody likes you", "you are worthless", "kill yourself", ...) is matched explicitly (score 1.0, `matched_rule: harassment_pattern`).
-3. **TF-IDF + MLP classifier (96.0% accuracy):** the ONNX model scores the text; `score >= 0.5` is labeled toxic. Typical scores are strongly bimodal — clean text ≈ 0.001–0.02, clearly abusive text ≈ 0.99–1.0.
+3. **DistilBERT classifier (v3):** the ONNX model scores the text; `score >= 0.5` is labeled toxic. Typical scores are strongly bimodal — clean text ≈ 0.0003–0.005, clearly abusive text ≈ 0.92–1.0.
 
 ## Quick start (local)
 
@@ -21,10 +22,10 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-On first start, the model weights and the TF-IDF vectorizer are downloaded
+On first start, the model, tokenizer and tokenizer config are downloaded
 automatically from the
-[model-v2 release](https://github.com/Vishalkumar-acad/Content-Moderation-Model/releases/tag/model-v2)
-and each file is verified (exact size + sha256); a stale v1 copy is rejected
+[model-v3 release](https://github.com/Vishalkumar-acad/Content-Moderation-Model/releases/tag/model-v3)
+and each file is verified (exact size + sha256); a stale v2 copy is rejected
 and re-downloaded. The API docs are served at `/docs`.
 
 ## API
@@ -32,7 +33,7 @@ and re-downloaded. The API docs are served at `/docs`.
 ### `GET /` — health / status
 
 ```json
-{"service": "content-moderation-model", "status": "ok", "model_loaded": true, "model_status": "ok"}
+{"service": "content-moderation-model", "version": "1.5.0 (DistilBERT v3)", "status": "ok", "model_loaded": true, "model_status": "ok"}
 ```
 
 ### `POST /moderate`
@@ -44,81 +45,111 @@ curl -X POST http://localhost:8000/moderate \
 ```
 
 ```json
-{"text_length": 26, "toxic": false, "score": 0.0185, "label": "neutral"}
+{"text_length": 26, "toxic": false, "score": 0.0003, "label": "neutral"}
 ```
+
+The raw `score` is always returned, so callers can apply their own zones
+(e.g. `>= 0.9` auto-hide, `0.5–0.9` admin-review flag).
 
 ## Deployment (Render.com)
 
 - **Build command:** `pip install -r requirements.txt`
 - **Start command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-`render.yaml` is included. The service downloads its own weights at startup, so
-no large files need to be in the git tree. On Render's free plan the instance
-sleeps when idle; the first request after idle takes ~50 s to wake up.
+`render.yaml` is included. The service downloads its own model files at
+startup (fail-closed sha256 verification), so no large files need to be in
+the git tree. On Render's free plan the instance sleeps when idle; the first
+request after idle takes ~50 s to wake up.
 
-## Training
-
-Trained in a Kaggle GPU notebook (PyTorch), then exported to ONNX.
-
-### v2 (current) — 80/20 anti-forgetting retrain
+## v3 — DistilBERT (current)
 
 | | |
 |---|---|
-| Dataset | [SetFit/toxic_conversations](https://huggingface.co/datasets/SetFit/toxic_conversations) — 1,754,874 comments, 100% retained **plus** ~90 unique error rows (mined false positives/negatives + curated anchors), oversampled to ~25% of the mix |
-| Method | 80/20 rule: all original data kept, error additions oversampled — the model learns the new failure families without forgetting the old ones (best-val checkpoint guards against overfitting) |
-| Vectorizer | `TfidfVectorizer(max_features=30_000, ngram_range=(1, 2))`, scikit-learn 1.6.1 (refit on the combined corpus) |
-| Architecture | `fc1` Linear 30000→256 → ReLU → Dropout(0.3) → `fc2` Linear 256→1 → Sigmoid (identical to v1) |
-| Objective | `BCELoss`, Adam (lr=0.002), 12 epochs, batch 4096, best-val checkpointing |
-| Best val AUC | **0.9825** |
-| Held-out accuracy | **95.96%** (v1: 94.4%) |
-| Export | `torch.onnx.export` (external weights) + `joblib.dump(vectorizer)` |
+| Dataset | [SetFit/toxic_conversations](https://huggingface.co/datasets/SetFit/toxic_conversations) — 1,754,874 comments (~8% toxic) |
+| Base model | `distilbert-base-uncased` (HuggingFace transformers), max sequence 128 tokens |
+| Training | Kaggle GPU (T4 x2), 3 epochs, best val AUC **0.9662** |
+| Export | PyTorch → ONNX fp32 (268 MB) → dynamic int8 quantization (**67.4 MB**) |
+| Inference | `input_ids` + `attention_mask` (int64, padded to 128) → `score` (sigmoid included), ONNX Runtime CPU |
 
-### v1 (original)
+### Why v3 — context understanding
 
-| | |
-|---|---|
-| Dataset | [SetFit/toxic_conversations](https://huggingface.co/datasets/SetFit/toxic_conversations) — 1.8M comments (~8% toxic) |
-| Objective | `BCELoss`, Adam (lr=0.005), 3 epochs |
-| Held-out accuracy | 94.4% |
+The v1/v2 TF-IDF classifier could not tell *garbage the insult* from
+*garbage the trash*. The transformer can:
 
-## What v2 fixed
-
-The v2 retrain was driven by errors found by an automated error-mining run
-(20,000 real civil-comments scored through the live pipeline) and real
-user reports:
-
-| Case | v1 score | v2 score |
-|---|---|---|
-| "Please put the garbage in the trash" (benign) | 0.999999 | 0.000253 |
-| "He works as a garbage collector in our city" (benign) | 0.963 | 0.000068 |
-| "My phone battery is trash" (benign) | 0.87 | 0.000017 |
-| "You are totally trash" (toxic) | 0.944 | 0.999992 |
-| "You are a worthless piece of garbage" (toxic) | ~0.9 | 1.0000 |
-
-The v1.4.1 wordlist update additionally catches (score 1.0):
-nigger/niggas/nigga, horseshit (word-boundary fix), assclown, scumbag.
-
-### Independent evaluation (20,000 fresh civil comments, never seen in training)
-
-| | v1 | v2 model-only | v2 full pipeline |
+| Case | v1 | v2 (TF-IDF) | v3 (DistilBERT) |
 |---|---|---|---|
-| Accuracy | ~95.7% | **99.11%** | **98.89%** |
-| AUC | ~0.978 | **0.9858** | 0.9866 |
-| Missed toxic (FN) | 842 (4.21%) | **99 (0.50%)** | **97 (0.48%)** |
-| False positives | 13 | 80 (0.40%) | 124 (0.62%)* |
+| "Please put the garbage in the trash" (benign) | 0.9999 | 0.0003 | **0.0024** |
+| "He works as a garbage collector in our city" (benign) | 0.963 | 0.0001 | **0.0004** |
+| "My phone battery is trash" (benign) | 0.87 | 0.0000 | **0.0005** |
+| "You are totally trash" (toxic) | 0.944 | 1.0000 | **0.9955** |
+| "You are a worthless piece of garbage" (toxic) | ~0.9 | 1.0000 | **1.0000** |
 
-\* The full pipeline also flags comments that contain profanity but were
-labeled non-toxic by the dataset (profanity != toxicity) — a deliberate
-policy choice. Most full-pipeline false positives land in the 0.5-0.9
-flag-only zone (admin review), not auto-hide (>= 0.9).
+Remaining known borderline cases (documented, not hidden): "Please take
+out the garbage" scores 0.52 and "I could kill for a cup of coffee right
+now" scores 0.81 — both land in the admin-review zone, the comment stays
+visible. No model is perfect; the sweep table below shows the measured
+trade-off.
 
-## Model details
+### Independent evaluation — same 20,000 fresh civil comments
 
-| | |
+Both models scored through the **full production pipeline** (all three
+layers) on identical, never-seen data:
+
+| | v2 (TF-IDF) | v3 (DistilBERT) |
+|---|---|---|
+| Accuracy | **98.95%** | 96.84% |
+| Toxic caught (TP) | 419/502 (83.5%) | **486/502 (96.8%)** |
+| Missed toxic (FN) | 83 | **16 (5x better)** |
+| Innocent flagged (FP) | **127 (0.65%)** | 616 (3.2%)* |
+| AUC | 0.9894 | **0.9942** |
+
+\* Most v3 false positives land in the 0.5–0.9 admin-review zone (comment
+stays visible), not auto-hide — a deliberate recall-first policy. The
+decision threshold was calibrated with a measured sweep:
+
+| threshold | FP | FN | toxic caught |
+|---|---|---|---|
+| **0.5 (production)** | 617 | **16** | **96.8%** |
+| 0.6 | 469 | 22 | 95.6% |
+| 0.7 | 318 | 31 | 93.8% |
+| 0.8 | 211 | 47 | 90.6% |
+| 0.9 | 112 | 75 | 85.1% |
+
+## v2 — TF-IDF retrain (previous)
+
+An 80/20 anti-forgetting retrain of the original TF-IDF + MLP model: all
+original data kept, ~90 error-mined additions (from a 20,000-comment mining
+run + real user reports) oversampled to ~25% of the mix. Best val AUC
+0.9825, held-out accuracy 95.96%. Weights remain available in the
+[model-v2 release](https://github.com/Vishalkumar-acad/Content-Moderation-Model/releases/tag/model-v2)
+as a rollback.
+
+## v1 — original (historical)
+
+TF-IDF (30,000 features) → Linear 30000→256 → ReLU → Linear 256→1 →
+Sigmoid. Held-out accuracy 94.4%.
+
+## Files in this repo
+
+| File | Purpose |
 |---|---|
-| Architecture | TF-IDF (30,000 features) → Gemm fc1 (30000→256) → ReLU → Gemm fc2 (256→1) → Sigmoid |
-| Size | 1 KB graph + 30,785,536 bytes external weights (~29 MB) |
-| Inference | ONNX Runtime (CPU), milliseconds per request |
+| `main.py` | Production FastAPI server (v1.5.0) — three-layer pipeline, fail-closed model download |
+| `requirements.txt` | fastapi, uvicorn, onnxruntime, tokenizers, numpy |
+| `render.yaml` | Render.com service definition |
+| `test-live-v3.py` | 24-case battery against the **live** production API |
+| `colab-v2-vs-v3.py` | Head-to-head v2 vs v3 evaluation on the same 20k comments |
+| `colab-v3-accuracy.py` | v3 full-pipeline accuracy on the same 20k data |
+| `colab-v3-threshold-sweep.py` | FP/FN vs decision threshold (calibration data) |
+| `kaggle-v3-train-distilbert.py` | v3 training notebook script (PyTorch) |
+| `kaggle-v3-verify-deploy.py` | Post-export verification + int8 variants + deploy bundle |
+
+## Release assets (model-v3)
+
+| File | Size | sha256 |
+|---|---|---|
+| `distilbert_moderation_v3_int8.onnx` | 67,363,334 | `bf5981da82aad9aa0c7c4dbcf158480772d6111df28e42f69c99f72a27e76f3e` |
+| `tokenizer.json` | 711,661 | `da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0` |
+| `tokenizer_config.json` | 322 | `797ed9ba72b500001971b827b0040b8743def8ec38f9cd4cda4c4945734d3596` |
 
 ## Dataset & attribution
 
