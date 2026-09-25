@@ -46,8 +46,13 @@ RELEASE_BASE_URL = (
     "releases/download/model-v3/"
 )
 MAX_LEN = 128
+# Decision threshold for the model score. Calibrated on 20,000 civil_comments
+# (same seed as the v2 test): at 0.8 the false-positive rate equals v2's
+# (127/19498 = 0.64%) while false negatives stay 5x lower than v2's (16 vs 83).
+# The raw score is returned unchanged; the site keeps its own score zones.
+FLAG_THRESHOLD = 0.8
 
-app = FastAPI(title="Content Moderation Model", version="1.5.0")
+app = FastAPI(title="Content Moderation Model", version="1.5.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -225,7 +230,7 @@ load_model()
 def health() -> dict:
     return {
         "service": "content-moderation-model",
-        "version": "1.5.0 (DistilBERT v3)",
+        "version": "1.5.1 (DistilBERT v3, threshold 0.8)",
         "status": "ok" if (tokenizer is not None and session is not None) else "degraded",
         "tokenizer_loaded": tokenizer is not None,
         "model_loaded": session is not None,
@@ -262,9 +267,9 @@ def moderate(req: ModerateRequest) -> dict:
     score = _predict(req.text)
     return {
         "text_length": len(req.text),
-        "toxic": score >= 0.5,
+        "toxic": score >= FLAG_THRESHOLD,
         "score": round(score, 6),
-        "label": "toxic" if score >= 0.5 else "neutral",
+        "label": "toxic" if score >= FLAG_THRESHOLD else "neutral",
     }
 
 
