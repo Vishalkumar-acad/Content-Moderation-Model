@@ -15,6 +15,13 @@ A content-moderation model for real-time comment and post moderation, served thr
 2. **Harassment-phrase patterns (deterministic):** politely-worded harassment ("nobody likes you", "you are worthless", "kill yourself", ...) is matched explicitly (score 1.0, `matched_rule: harassment_pattern`).
 3. **DistilBERT classifier (v3):** the ONNX model scores the text; `score >= 0.5` is labeled toxic. Typical scores are strongly bimodal — clean text ≈ 0.0003–0.005, clearly abusive text ≈ 0.92–1.0.
 
+Layers 1–2 are also matched against a **de-obfuscated copy** of the text
+(NFKC unicode normalization, a leetspeak digit map, collapsed character
+elongation and spaced-out letters), so `sh1t`, `f u c k`, `sh i i t` or
+fullwidth `ｆｕｃｋ` are caught like plain profanity. The transformer always
+scores the original text — it was trained on real text and normalized input
+would shift its scores unpredictably.
+
 ## Quick start (local)
 
 ```bash
@@ -33,7 +40,7 @@ and re-downloaded. The API docs are served at `/docs`.
 ### `GET /` — health / status
 
 ```json
-{"service": "content-moderation-model", "version": "1.5.0 (DistilBERT v3)", "status": "ok", "model_loaded": true, "model_status": "ok"}
+{"service": "content-moderation-model", "version": "1.6.0 (DistilBERT v3)", "status": "ok", "model_loaded": true, "model_status": "ok"}
 ```
 
 ### `POST /moderate`
@@ -90,6 +97,20 @@ now" scores 0.81 — both land in the admin-review zone, the comment stays
 visible. No model is perfect; the sweep table below shows the measured
 trade-off.
 
+Known limitations (honest list):
+
+- The wordlist layer is context-blind — an educational or quoted
+  discussion of a slur still scores 1.0. The raw `score` field lets a
+  caller distinguish model-judged toxicity from wordlist hits via
+  `matched_rule`.
+- Censored spellings ("f\*ck") and mixed-script homoglyphs (Cyrillic
+  lookalikes) are not caught by the de-obfuscation layer.
+- The API has no built-in authentication or rate limiting. CORS is
+  restricted, but if you deploy it publicly, put it behind your own
+  gateway.
+- Multilingual coverage is English + some Hindi; romanized or other
+  Indic-language abuse relies on the wordlist only.
+
 ### Independent evaluation — same 20,000 fresh civil comments
 
 Both models scored through the **full production pipeline** (all three
@@ -133,8 +154,8 @@ Sigmoid. Held-out accuracy 94.4%.
 
 | File | Purpose |
 |---|---|
-| `main.py` | Production FastAPI server (v1.5.0) — three-layer pipeline, fail-closed model download |
-| `requirements.txt` | fastapi, uvicorn, onnxruntime, tokenizers, numpy |
+| `main.py` | Production FastAPI server (v1.6.0) — three-layer pipeline with de-obfuscation, fail-closed model download |
+| `requirements.txt` | fastapi, uvicorn, onnxruntime, tokenizers, numpy (version-bounded) |
 | `render.yaml` | Render.com service definition |
 | `test-live-v3.py` | 24-case battery against the **live** production API |
 | `colab-v2-vs-v3.py` | Head-to-head v2 vs v3 evaluation on the same 20k comments |
