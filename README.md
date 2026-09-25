@@ -148,13 +148,73 @@ as a rollback.
 ## v1 — original (historical)
 
 TF-IDF (30,000 features) → Linear 30000→256 → ReLU → Linear 256→1 →
-Sigmoid. Held-out accuracy 94.4%. The complete v1 snapshot (code +
-vectorizer) lives at the
-[`model-v1` tag](https://github.com/Vishalkumar-acad/Content-Moderation-Model/tree/model-v1),
-and its full weights are published as the
+Sigmoid. Held-out accuracy 94.4%. The complete, runnable v1 snapshot lives
+at the [`model-v1` tag](https://github.com/Vishalkumar-acad/Content-Moderation-Model/tree/model-v1)
+(v1.3.0 code), and its full weights are published as the
 [model-v1 release](https://github.com/Vishalkumar-acad/Content-Moderation-Model/releases/tag/model-v1)
-asset (the copy once committed to the git tree was a truncated 4 MiB
-upload, so the release asset is the real one).
+asset.
+
+## Running the legacy versions (v1 / v2) — pitfalls we hit, documented so you don't repeat them
+
+Both legacy models were verified working end-to-end on 2026-09-25. Recipes
+and the exact problems encountered:
+
+### v1 (TF-IDF original)
+
+```bash
+git clone https://github.com/Vishalkumar-acad/Content-Moderation-Model
+cd Content-Moderation-Model
+git checkout model-v1        # v1.3.0 — the runnable v1
+pip install -r requirements.txt
+uvicorn main:app --port 8000 # weights auto-download from the model-v1 release
+```
+
+**Pitfalls we hit:**
+
+- **Double-sigmoid bug.** The v1 ONNX graph already ends with a `Sigmoid`
+  node, so its raw output *is* the probability. The very first main.py
+  applied sigmoid a second time, squashing every score into 0.50–0.73
+  (benign text scored ~0.50 = "toxic"). Fixed in commit `5acb2fdd`. The
+  `model-v1` tag originally pointed at the pre-fix commit `7c0bb543`; it
+  now points at the fixed v1.3.0 code (`f918ca7c`). If you ever use an old
+  checkout from before that fix, do NOT apply sigmoid to the graph output
+  again.
+- **Truncated weights in git.** The `content_moderation_gpu.onnx.data` once
+  committed to the git tree was truncated at exactly 4 MiB by an upload
+  script bug — a real file is 30,785,536 bytes. The complete weights exist
+  only as the model-v1 release asset; main.py (v1.1+) downloads and
+  sha256-verifies them automatically. Never trust a git-tree copy of the
+  weights; always use the release asset.
+- **Files that must go together.** v1 needs the 5,074-byte ONNX graph
+  skeleton and the v1 vectorizer from the *same* snapshot as the weights.
+  Mixing a v2 vectorizer with v1 weights produces plausible-looking but
+  wrong scores.
+- **Known v1 weaknesses (fixed in v2):** benign garbage/trash sentences
+  score 0.69–0.96 (false positives) and the single word "NIGGER" scored
+  0.001 (miss) — the wordlist additions in v1.2+ were mined to fix exactly
+  these.
+
+### v2 (TF-IDF retrain)
+
+```bash
+git clone https://github.com/Vishalkumar-acad/Content-Moderation-Model
+cd Content-Moderation-Model
+git checkout 9db847dbe4f933aa07d396c028bf86d73aa55be7  # pinned v2 commit
+pip install -r requirements.txt
+uvicorn main:app --port 8000  # weights + vectorizer auto-download from the model-v2 release
+```
+
+**Notes from our setup:**
+
+- The 988-byte `content_moderation_gpu.onnx` graph skeleton comes from that
+  commit's git tree; the weights (30,785,536 B, sha256 `736f23b4…`) and the
+  vectorizer (1,159,880 B, sha256 `82d209ce…`) download from the model-v2
+  release with size + sha verification.
+- Verified working 2026-09-25: benign garbage contexts 0.00002–0.0004,
+  "You are totally trash" 0.999995, "NIGGER" caught by the wordlist at 1.0.
+- The graph is shared architecture-wise with v1, but v2's own weights and
+  vectorizer are on the model-v2 release — never mix a v1 `.data` (sha256
+  `67a0c7e7…`) with v2 code.
 
 ## Files in this repo
 
