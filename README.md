@@ -170,6 +170,16 @@ cat distilbert_moderation_v3_fp16.onnx.part00 distilbert_moderation_v3_fp16.onnx
 
 (Windows: `copy /b distilbert_moderation_v3_fp16.onnx.part00+distilbert_moderation_v3_fp16.onnx.part01 distilbert_moderation_v3_fp16.onnx`)
 
+**Original fp32 training export (268 MB)** — the full-precision model
+straight from training, for anyone who wants to re-quantize (e.g. with
+different int8 settings) or continue fine-tuning:
+
+| File | Size | sha256 |
+|---|---|---|
+| `distilbert_moderation_v3_fp32.onnx` | 267,940,094 | `674db19489e42d5c4a7ef64e6c56c07b15a3ab52306d1fe24077d5ebab95b4f0` |
+
+Not needed to run the API — production serves the int8 build.
+
 ## Dataset & attribution
 
 The training data is a version of the [Jigsaw Unintended Bias in Toxicity
