@@ -1,18 +1,16 @@
 """
 Content Moderation Model — FastAPI inference server (for Render.com).
 
-Loads the TF-IDF vectorizer (tfidf_vectorizer.pkl) and the ONNX model
-(content_moderation_gpu.onnx, weights in content_moderation_gpu.onnx.data)
-and exposes:
+v3 pipeline (DistilBERT deep learning):
+  1. profanity wordlist (deterministic, v1.4.1)
+  2. harassment-phrase regex (deterministic)
+  3. DistilBERT int8 ONNX model (tokenizers + onnxruntime)
 
-  GET  /         -> service health + model status
-  POST /moderate -> {"text": "..."} -> toxicity score
-
-The v2 weights (30 MB) and the v2 TF-IDF vectorizer are shipped as GitHub
-release assets (model-v2). On startup, every file is verified against its
-exact size and sha256; anything missing, truncated or stale (e.g. a v1
-copy) is re-downloaded automatically - the weights in a background
-thread — the web server binds its port immediately, so Render's health
+The model (67 MB), tokenizer.json and tokenizer_config.json are shipped as
+GitHub release assets (model-v3). On startup every file is verified against
+its exact size and sha256; anything missing, truncated or stale (e.g. an old
+v2 copy) is re-downloaded automatically — the 67 MB model in a background
+thread, so the web server binds its port immediately and Render's health
 check passes even while the download is in flight. /moderate returns 503
 until the model finishes loading.
 """
@@ -26,7 +24,6 @@ import re
 import threading
 import urllib.request
 
-import joblib
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,21 +32,22 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("content-moderation")
 
-MODEL_PATH = "content_moderation_gpu.onnx"
-DATA_PATH = "content_moderation_gpu.onnx.data"
-VECTORIZER_PATH = "tfidf_vectorizer.pkl"
-# Required size of the external weights file, computed from the ONNX graph:
-# fc1.bias (1024) + fc2.weight (1024) + fc1.weight (30,720,000) + 65,536 offset.
-EXPECTED_DATA_SIZE = 30_785_536
-EXPECTED_SHA256 = "736f23b4fef8a231ad2e1589561840be0d997e214848be6e27589376aa402bda"
+MODEL_PATH = "distilbert_moderation_v3_int8.onnx"
+MODEL_SIZE = 67_363_334
+MODEL_SHA256 = "bf5981da82aad9aa0c7c4dbcf158480772d6111df28e42f69c99f72a27e76f3e"
+TOKENIZER_PATH = "tokenizer.json"
+TOKENIZER_SIZE = 711_661
+TOKENIZER_SHA256 = "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0"
+TOKENIZER_CONFIG_PATH = "tokenizer_config.json"
+TOKENIZER_CONFIG_SIZE = 322
+TOKENIZER_CONFIG_SHA256 = "797ed9ba72b500001971b827b0040b8743def8ec38f9cd4cda4c4945734d3596"
 RELEASE_BASE_URL = (
     "https://github.com/Vishalkumar-acad/Content-Moderation-Model/"
-    "releases/download/model-v2/"
+    "releases/download/model-v3/"
 )
-VECTORIZER_SIZE = 1_159_880
-VECTORIZER_SHA256 = "82d209ce61c18a5e0bbf75ec3abf22b97657a89f64452a2601c6b537c9a00205"
+MAX_LEN = 128
 
-app = FastAPI(title="Content Moderation Model", version="1.4.1")
+app = FastAPI(title="Content Moderation Model", version="1.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,15 +61,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-vectorizer = None
-vectorizer_error: str | None = None
+tokenizer = None
 session = None
 model_error: str | None = None
 model_status = "initializing"  # initializing | downloading | ok | error
 
-# Deterministic profanity layer: the TF-IDF model is weak on very short texts
-# (e.g. a single abusive word scores 0.001), so explicitly abusive words are
-# always treated as toxic regardless of the model score.
+# Deterministic profanity layer: short single-word abuse ("NIGGER") can still
+# land under the model threshold on rare tokenizations, so explicitly abusive
+# words are always treated as toxic regardless of the model score.
 _PROFANITY_RE = re.compile(
     r"\b(?:"
     r"asshole|assholes|bastard|bastards|bitch|bitches|bullshit|crap|cunt|cunts|"
@@ -87,9 +84,9 @@ _PROFANITY_RE = re.compile(
 )
 
 # Deterministic harassment-phrase layer: politely-worded harassment
-# ("nobody cares about your existence") contains no profanity, so the TF-IDF
-# model scores it ~0.0005 — deep in "clean" territory, far below any usable
-# threshold. Common harassment phrasings are therefore matched explicitly too.
+# ("nobody cares about your existence") contains no profanity, so a
+# text classifier can still score it low. Common harassment phrasings are
+# therefore matched explicitly too.
 _HARASSMENT_RES = [
     re.compile(p, re.IGNORECASE)
     for p in (
@@ -116,20 +113,6 @@ class ModerateRequest(BaseModel):
     text: str = Field(..., min_length=0, max_length=20000)
 
 
-def load_vectorizer() -> None:
-    global vectorizer, vectorizer_error
-    try:
-        if not _file_ok(VECTORIZER_PATH, VECTORIZER_SIZE, VECTORIZER_SHA256):
-            log.info("Fetching %s from release (missing or outdated)...", VECTORIZER_PATH)
-            _download_verified(VECTORIZER_PATH, VECTORIZER_SIZE, VECTORIZER_SHA256)
-        vectorizer = joblib.load(VECTORIZER_PATH)
-        n = len(getattr(vectorizer, "vocabulary_", {}))
-        log.info("Loaded %s (vocabulary: %d features)", VECTORIZER_PATH, n)
-    except Exception as exc:  # noqa: BLE001
-        vectorizer_error = f"{type(exc).__name__}: {exc}"
-        log.exception("Failed to load vectorizer")
-
-
 def _file_ok(path: str, size: int, sha256: str) -> bool:
     """True only if the local file exists with the exact size and sha256."""
     try:
@@ -142,7 +125,7 @@ def _file_ok(path: str, size: int, sha256: str) -> bool:
 
 
 def _download_verified(path: str, size: int, sha256: str) -> None:
-    """Download `path` from the model-v2 release, verify size+sha, move into place."""
+    """Download `path` from the model-v3 release, verify size+sha, move into place."""
     url = RELEASE_BASE_URL + path
     tmp_path = path + ".tmp"
     urllib.request.urlretrieve(url, tmp_path)
@@ -156,55 +139,85 @@ def _download_verified(path: str, size: int, sha256: str) -> None:
     os.replace(tmp_path, path)
 
 
-def _try_load_model() -> bool:
-    """Load the ONNX session from the local files. Returns True on success."""
-    global session, model_error
+def _try_load_all() -> bool:
+    """Load tokenizer + ONNX session from the local files. Returns True on success."""
+    global tokenizer, session, model_error
     try:
+        from tokenizers import Tokenizer
+
+        tok = Tokenizer.from_file(TOKENIZER_PATH)
+        # Explicit padding/truncation — NEVER handcraft the attention mask;
+        # the tokenizer's own encoding is the source of truth (v3 lesson).
+        tok.enable_truncation(max_length=MAX_LEN)
+        tok.enable_padding(length=MAX_LEN, pad_id=0, pad_token="[PAD]")
+        tokenizer = tok
+
         import onnxruntime as ort
 
         session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+        # warmup so the first real request is fast
+        _predict("warmup: please take out the garbage")
         model_error = None
-        log.info("Loaded %s", MODEL_PATH)
+        log.info("Loaded tokenizer + %s (warmup ok)", MODEL_PATH)
         return True
     except Exception as exc:  # noqa: BLE001
+        tokenizer = None
         session = None
         model_error = f"{type(exc).__name__}: {exc}"
         log.error("Model not available: %s", model_error)
         return False
 
 
-def _download_and_load() -> None:
+def _ensure_and_load() -> None:
     global model_status, model_error
     model_status = "downloading"
     try:
-        log.info("Downloading model weights from release asset (%d bytes)...", EXPECTED_DATA_SIZE)
-        _download_verified(DATA_PATH, EXPECTED_DATA_SIZE, EXPECTED_SHA256)
-        log.info("Weights downloaded and verified (sha256 ok).")
-        if _try_load_model():
+        files = [
+            (TOKENIZER_CONFIG_PATH, TOKENIZER_CONFIG_SIZE, TOKENIZER_CONFIG_SHA256),
+            (TOKENIZER_PATH, TOKENIZER_SIZE, TOKENIZER_SHA256),
+            (MODEL_PATH, MODEL_SIZE, MODEL_SHA256),
+        ]
+        for path, size, sha in files:
+            if not _file_ok(path, size, sha):
+                log.info("Fetching %s from model-v3 release (%d bytes)...", path, size)
+                _download_verified(path, size, sha)
+                log.info("%s downloaded and verified (sha256 ok).", path)
+        if _try_load_all():
             model_status = "ok"
         else:
             model_status = "error"
     except Exception as exc:  # noqa: BLE001
         model_error = f"{type(exc).__name__}: {exc}"
         model_status = "error"
-        log.error("Weight download failed: %s", model_error)
+        log.error("Model download failed: %s", model_error)
 
 
 def load_model() -> None:
     global model_status
-    if _file_ok(DATA_PATH, EXPECTED_DATA_SIZE, EXPECTED_SHA256) and _try_load_model():
+    files_ok = all([
+        _file_ok(TOKENIZER_CONFIG_PATH, TOKENIZER_CONFIG_SIZE, TOKENIZER_CONFIG_SHA256),
+        _file_ok(TOKENIZER_PATH, TOKENIZER_SIZE, TOKENIZER_SHA256),
+        _file_ok(MODEL_PATH, MODEL_SIZE, MODEL_SHA256),
+    ])
+    if files_ok and _try_load_all():
         model_status = "ok"
         return
-    if not _file_ok(DATA_PATH, EXPECTED_DATA_SIZE, EXPECTED_SHA256):
-        log.warning(
-            "%s missing or truncated (git copy was cut at 4 MiB); "
-            "fetching full file from the GitHub release in the background.",
-            DATA_PATH,
-        )
-        threading.Thread(target=_download_and_load, daemon=True).start()
+    log.warning(
+        "v3 model files missing or stale; fetching from the GitHub release "
+        "in the background (67 MB download)."
+    )
+    threading.Thread(target=_ensure_and_load, daemon=True).start()
 
 
-load_vectorizer()
+def _predict(text: str) -> float:
+    """DistilBERT int8 score for one text (0..1, sigmoid included in graph)."""
+    enc = tokenizer.encode(text)
+    ids = np.array([enc.ids], dtype=np.int64)
+    masks = np.array([enc.attention_mask], dtype=np.int64)
+    (score,) = session.run(["score"], {"input_ids": ids, "attention_mask": masks})
+    return float(score[0][0])
+
+
 load_model()
 
 
@@ -212,20 +225,18 @@ load_model()
 def health() -> dict:
     return {
         "service": "content-moderation-model",
-        "status": "ok" if (vectorizer is not None and session is not None) else "degraded",
-        "vectorizer_loaded": vectorizer is not None,
+        "version": "1.5.0 (DistilBERT v3)",
+        "status": "ok" if (tokenizer is not None and session is not None) else "degraded",
+        "tokenizer_loaded": tokenizer is not None,
         "model_loaded": session is not None,
         "model_status": model_status,
-        "vectorizer_error": vectorizer_error,
         "model_error": model_error,
-        "expected_data_bytes": EXPECTED_DATA_SIZE,
+        "expected_model_bytes": MODEL_SIZE,
     }
 
 
 @app.post("/moderate")
 def moderate(req: ModerateRequest) -> dict:
-    if vectorizer is None:
-        raise HTTPException(status_code=503, detail=f"Vectorizer unavailable: {vectorizer_error}")
     if _PROFANITY_RE.search(req.text):
         return {
             "text_length": len(req.text),
@@ -242,15 +253,13 @@ def moderate(req: ModerateRequest) -> dict:
             "label": "toxic",
             "matched_rule": "harassment_pattern",
         }
-    if session is None:
+    if session is None or tokenizer is None:
         raise HTTPException(
             status_code=503,
             detail=f"Model unavailable ({model_status}): {model_error}",
         )
 
-    features = vectorizer.transform([req.text]).toarray().astype(np.float32)
-    (prob,) = session.run(["output"], {"input": features})
-    score = float(prob[0][0])  # graph already ends with Sigmoid — this is the probability
+    score = _predict(req.text)
     return {
         "text_length": len(req.text),
         "toxic": score >= 0.5,
