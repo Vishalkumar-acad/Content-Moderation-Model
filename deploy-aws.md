@@ -9,7 +9,11 @@ to score text — nothing is downloaded on the first request.
 # Docker (Amazon Linux / Ubuntu)
 sudo dnf install -y docker        # or: sudo apt-get install -y docker.io
 sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"   # log out and back in for this to apply
+sudo usermod -aG docker "$USER"
+# The group change only applies to NEW logins. Either reconnect your SSH
+# session, or run `newgrp docker` once in this shell. Until then, prefix
+# docker commands with sudo — e.g. `sudo docker compose up -d --build`.
+# If you skip the group entirely, `sudo docker ...` works every time.
 
 # Compose plugin, if your distro does not ship it
 sudo dnf install -y docker-compose-plugin   # or: sudo apt-get install -y docker-compose-v2
