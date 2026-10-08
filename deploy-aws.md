@@ -41,27 +41,57 @@ curl -s -X POST localhost:8000/moderate \
   -d '{"text":"You are a wonderful person"}'
 ```
 
-## 4. Put it behind the reverse proxy
+## 4. Open the web ports and point a name at the box
+
+**Security group.** In the AWS console, open the instance's security group and
+add inbound rules for HTTP (80) and HTTPS (443) from `0.0.0.0/0`. Without
+them Caddy cannot reach Let's Encrypt and no certificate is issued.
+
+**DNS.** In Cloudflare, add an `A` record for the name you want
+(e.g. `moderation`) pointing at the box's public IPv4 address. Leave it
+**DNS only** (grey cloud) for now — that lets Caddy get its certificate
+directly. You can switch to the proxied (orange) setting later, with the
+SSL/TLS mode set to **Full**.
+
+The box's public IP:
+
+```bash
+curl -s ifconfig.me
+```
+
+## 5. Put it behind the reverse proxy
 
 The service listens on **127.0.0.1:8000 only** — Caddy is the single way in.
-Add this to your Caddyfile (replace the hostname with the one you want):
 
-```caddy
+```bash
+# Install Caddy (official repository)
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+
+# Add the site block (append — the file may already hold other sites)
+sudo tee -a /etc/caddy/Caddyfile >/dev/null <<'EOF'
+
 moderation.pixelabs.in {
     reverse_proxy localhost:8000
 }
-```
+EOF
 
-Then reload Caddy:
-
-```bash
 sudo systemctl reload caddy
 ```
 
-Caddy gets the certificate automatically, exactly like the other hostnames
-on this box.
+Replace `moderation.pixelabs.in` with the name you created in step 4. Caddy
+fetches and renews the certificate on its own, exactly like the other
+hostnames on your Azure box. Give it a few seconds, then check:
 
-## 5. Point the tools site at it
+```bash
+curl -s https://moderation.pixelabs.in/
+```
+
+`"model_loaded":true` in the reply means the public path is live.
+
+## 6. Point the tools site at it
 
 The tools worker proxies `/api/moderate` to this service. Set the
 `MODERATION_URL` environment variable in the Cloudflare dashboard (Worker →
