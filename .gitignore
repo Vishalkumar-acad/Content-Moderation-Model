@@ -1,0 +1,8 @@
+# The model files are fetched from the model-v3 release (see bake_model.py) —
+# they must never be committed.
+distilbert_moderation_v3_int8.onnx
+tokenizer.json
+tokenizer_config.json
+*.tmp
+__pycache__/
+*.pyc

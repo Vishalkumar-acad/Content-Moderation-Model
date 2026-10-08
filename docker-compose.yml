@@ -1,0 +1,23 @@
+# docker compose up -d --build
+#
+# The service is published on loopback only: the reverse proxy (Caddy) is the
+# single way in from the internet, exactly like the tools API on the other box.
+services:
+  moderation:
+    build: .
+    image: content-moderation-model:latest
+    container_name: moderation
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PORT: "8000"
+    # This box is shared — cap the model's appetite so it can never take the
+    # host down with it.
+    mem_limit: 900m
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)); sys.exit(0 if d.get('model_loaded') else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s

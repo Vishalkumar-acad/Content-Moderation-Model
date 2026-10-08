@@ -22,6 +22,13 @@ fullwidth `ｆｕｃｋ` are caught like plain profanity. The transformer always
 scores the original text — it was trained on real text and normalized input
 would shift its scores unpredictably.
 
+## Running it on your own box (AWS / Docker)
+
+`Dockerfile`, `docker-compose.yml` and a step-by-step guide live in
+[deploy-aws.md](deploy-aws.md). The 67 MB model is baked into the image at
+build time and verified by size + sha256, so a container starts ready to
+score text — nothing is downloaded on the first request.
+
 ## Quick start (local)
 
 ```bash
