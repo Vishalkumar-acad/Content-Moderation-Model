@@ -81,6 +81,22 @@ EOF
 sudo systemctl reload caddy
 ```
 
+**Never overwrite the Caddyfile** — do not use `>` on it. This box may
+already serve other hostnames (a `cockpit.pixelabs.in` block, for example),
+and overwriting silently drops them. Always append (`>>` or `tee -a`), and
+keep a copy first:
+
+```bash
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
+```
+
+If something does wipe it, put it back and reload:
+
+```bash
+sudo cp /etc/caddy/Caddyfile.bak /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
 Replace `moderation.pixelabs.in` with the name you created in step 4. Caddy
 fetches and renews the certificate on its own, exactly like the other
 hostnames on your Azure box. Give it a few seconds, then check:
