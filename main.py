@@ -1,7 +1,7 @@
 """
 Content Moderation Model — FastAPI inference server (for Render.com).
 
-v4 pipeline (DistilBERT deep learning + context layers):
+v4.1 pipeline (DistilBERT + context-aware deterministic layers):
   1. profanity wordlist (deterministic, v1.4.1) — with de-obfuscation
      normalization (leetspeak, fullwidth/homoglyphs, elongation, spaced
      single letters, zero-width chars)
@@ -9,9 +9,9 @@ v4 pipeline (DistilBERT deep learning + context layers):
   3. DistilBERT int8 ONNX model (tokenizers + onnxruntime)
 
 The model (67 MB), tokenizer.json and tokenizer_config.json are shipped as
-GitHub release assets (model-v4). On startup every file is verified against
+GitHub release assets (model-v3). On startup every file is verified against
 its exact size and sha256; anything missing, truncated or stale (e.g. an old
-v3 copy) is re-downloaded automatically — the 67 MB model in a background
+v2 copy) is re-downloaded automatically — the 67 MB model in a background
 thread, so the web server binds its port immediately and Render's health
 check passes even while the download is in flight. /moderate returns 503
 until the model finishes loading.
@@ -50,7 +50,7 @@ RELEASE_BASE_URL = (
 )
 MAX_LEN = 128
 
-app = FastAPI(title="Content Moderation Model", version="2.0.0")
+app = FastAPI(title="Content Moderation Model", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,28 +72,34 @@ model_status = "initializing"  # initializing | downloading | ok | error
 # Deterministic profanity layer: short single-word abuse ("NIGGER") can still
 # land under the model threshold on rare tokenizations, so explicitly abusive
 # words are always treated as toxic regardless of the model score.
-_PROFANITY_RE = re.compile(
-    r"\b(?:"
-    r"asshole|assholes|bastard|bastards|bitch|bitches|bullshit|crap|cunt|cunts|"
-    r"dick|dickhead|dickheads|dumbass|dumbasses|assclown|assclowns|fag|faggot|"
-    r"faggots|fuck|fucked|fucker|fuckers|fucking|motherfucker|motherfuckers|"
-    r"prick|pricks|puny cock|retard|retarded|shit|shits|shithead|shitheads|"
-    r"shitty|horseshit|slut|sluts|twat|scumbag|scumbags|nigger|niggas|nigga|"
-    r"wanker|wankers|whore|whores|chutiya|chutiye|madarchod|behenchod|"
-    r"bhosdike|bhen ke lode|gaandu|gandu|harami|kutta|kutte|haramkhor|"
-    r"randi|rand|saala harami"
-    r")\b",
+# =====================================================================
+# v4.1 deterministic layers -- CONTEXT-AWARE
+# =====================================================================
+# Person-directed slurs / insults: abusive only when actually aimed at a
+# person; quoted / reported / discussed / negated mentions are not.
+_SLUR_RE = re.compile(
+    r"\b(?:asshole|assholes|bastard|bastards|bitch|bitches|cunt|cunts|dick|dickhead|"
+    r"dickheads|dumbass|dumbasses|assclown|assclowns|fag|faggot|faggots|motherfucker|"
+    r"motherfuckers|prick|pricks|retard|retarded|slut|sluts|twat|scumbag|scumbags|"
+    r"nigger|niggas|nigga|wanker|wankers|whore|whores|chutiya|chutiye|madarchod|"
+    r"behenchod|bhosdike|bhen ke lode|gaandu|gandu|harami|haramkhor|randi|kutta|kutte)\b",
     re.IGNORECASE,
 )
-
-# Deterministic harassment-phrase layer: politely-worded harassment
-# ("nobody cares about your existence") contains no profanity, so a
-# text classifier can still score it low. Common harassment phrasings are
-# therefore matched explicitly too.
+# Expletives / intensifiers: abusive only when directed at a person
+# ("fuck you"), not as a filler ("this fucking traffic").
+_EXPLETIVE_RE = re.compile(
+    r"\b(?:fuck|fucked|fucker|fuckers|fucking|shit|shits|shitty|bullshit|horseshit|crap)\b",
+    re.IGNORECASE,
+)
+# Constructions that are always directed abuse.
+_DIRECTED_RE = re.compile(
+    r"\bfuck\s+(?:you|u|off)\b|\bshut\s+(?:the\s+fuck\s+)?up\b|\bstfu\b",
+    re.IGNORECASE,
+)
 _HARASSMENT_RES = [
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:nobody|no\s?one|none)\s+(?:cares?|liked|likes|loves?|misses|wants|needs|asked)\s+(?:about\s+|for\s+)?(?:you|u|ur)\b",
+        r"\b(?:nobody|no\s?one|none)\s+(?:cares?|liked|likes|loves?|misses|wants|needs|asked)\s+(?:about\s+|for\s+)?(?:you|u|your|ur)\b",
         r"\b(?:nobody|no\s?one)\s+would\s+(?:even\s+)?(?:miss|notice|remember|care)\s+(?:you|u)\b",
         r"\b(?:world|planet|everyone|everybody)\s+would\s+be\s+better\s+(?:off\s+)?without\s+(?:you|u)\b",
         r"\b(?:everyone|everybody|all)\s+(?:hates|hate)\s+(?:you|u)\b",
@@ -110,69 +116,118 @@ _HARASSMENT_RES = [
         r"\b(?:your|ur)\s+(?:writing|posts?|content|art|work|existence|opinions?)\s+(?:is|are)\s+(?:garbage|trash|worthless|pathetic|pointless|useless)\b",
     )
 ]
-
-# --- Threat-intent layer (NEW v1.7) -----------------------------------------
-# Indirect threats ("I know where you live", "watch your back", "your family
-# will pay") carry no profanity, so the wordlist AND the transformer miss them.
-# Match common threat constructions explicitly.
-_THREAT_RES = [
+# Threats: strong = clear harm (toxic); weak = ambiguous (review zone).
+_THREAT_STRONG_RES = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"\bi\s+know\s+where\s+you\s+(?:live|work|sleep|are|stay)\b",
-        r"\bwatch\s+your\s+back\b",
-        r"\byou\s+(?:will|'?ll|are\s+going\s+to|gonna)\s+regret\s+(?:this|it)\b",
-        r"\b(?:i|we)\s+(?:will|'?ll|am\s+going\s+to|'?m\s+gonna|gonna)\s+(?:come\s+after|find|hunt|get|hurt)\s+(?:you|u)\b",
-        r"\b(?:your|ur)\s+(?:family|kids?|children|parents|friends)\s+will\s+pay\b",
+        r"\b(?:i|we)\s+(?:will|'?ll|am\s+going\s+to|'?m\s+gonna|gonna)\s+(?:find|hunt|hurt|kill|come\s+after|get)\s+(?:you|u)\b",
+        r"\b(?:your|ur)\s+(?:family|kids?|children|parents)\s+will\s+pay\b",
         r"\bsleep\s+with\s+one\s+eye\s+open\b",
-        r"\benjoy\s+your\s+last\s+(?:days|hours|moments)\b",
         r"\bi'?m\s+coming\s+for\s+you\b",
-        r"\byou\s+(?:'?re|are)\s+(?:dead|done\s+for|finished)\b",
         r"\b(?:i'?ll|i\s+will)\s+make\s+you\s+pay\b",
-        r"\byou\s+better\s+(?:watch|be\s+careful|sleep)\b",
+        r"\byou\s+(?:'?re|are)\s+(?:dead|done\s+for)\b",
+        r"\bwatch\s+your\s+back\b",
     )
 ]
-
-# --- Context guard for the deterministic layers (NEW v1.7) ------------------
-# The wordlist/regex layers are context-blind: quoting a slur, denying an
-# insult, or discussing "the word X" all score a hard 1.0. When a matched token
-# sits inside quotes, follows a negation, or appears in a meta-linguistic frame,
-# downgrade it to the review zone instead of a block.
+_THREAT_WEAK_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\byou\s+(?:will|'?ll|are\s+going\s+to|gonna)\s+regret\s+(?:this|it)\b",
+        r"\byou'?ll\s+(?:be\s+sorry|find\s+out)\b",
+        r"\bfind\s+out\s+what\s+happens\b",
+        r"\byou\s+better\s+(?:watch|be\s+careful|sleep)\b",
+        r"\benjoy\s+your\s+last\s+(?:days|hours|moments)\b",
+        r"\byour\s+days\s+are\s+numbered\b",
+    )
+]
 _QUOTE_RE = re.compile(r'"[^"]*"|\u201c[^\u201d]*\u201d|\'[^\']*\'')
 _NEG_RE = re.compile(r"\b(?:not|never|no|n't|without|nor|neither)\b", re.IGNORECASE)
-_META_RE = re.compile(
-    r"\b(?:the\s+word|the\s+term|called|calling|saying|quote[ds]?|slurs?|"
-    r"report(?:ed|s)?|mention(?:ing|ed|s)?|example\s+of|discuss(?:ing|ed)?|"
-    r"filter|blocks?)\b",
+_REPORT_RE = re.compile(
+    r"\b(?:the\s+word|the\s+term|called|calling|says?|said|saying|wrote|writing|quoting|"
+    r"quote[ds]?|report(?:ed|s|ing)?|discuss(?:ed|ing)?|example\s+of|mention(?:ed|ing|s)?|"
+    r"slurs?|evidence|according\s+to)\b",
     re.IGNORECASE,
 )
-# model-side negation/denial guard: an insult word that the text is denying.
-_INSULT_LEXICON = re.compile(
-    r"\b(?:stupid|idiot|idiotic|dumb|fool|foolish|moron|moronic|imbecile|"
-    r"trash|garbage|worthless|pathetic|useless|disgusting|repulsive)s?\b",
+_YOU_RE = re.compile(r"\b(?:you|u|your|ur|you'?re|yourself|urself|yours)\b", re.IGNORECASE)
+_INSULT_LEX = re.compile(
+    r"\b(?:stupid|idiots?|idiotic|dumbs?|fools?|foolish|morons?|moronic|imbecile|trash|garbage|"
+    r"worthless|pathetic|useless|disgusting|repulsive|losers?|scum|jerks?|hate)\b",
     re.IGNORECASE,
 )
-_DENIAL_RE = re.compile(
-    r"\b(?:not|never|n't|no|isn'?t|aren'?t|wasn'?t|weren'?t)\b[^.!?]{0,40}?"
-    r"\b(?:call|calling|called|say|saying|said|insult|insulting|mean|implying|questioning)\b"
-    r"|\b(?:not|never|n't|no|isn'?t|aren'?t|wasn'?t|weren'?t)\b(?:\s+\w+){0,3}\s+"
-    r"\b(?:stupid|idiot|idiotic|dumb|fool|foolish|moron|trash|garbage|worthless|pathetic|useless)\b",
+# Benign uses of "kill" (not aimed at a person).
+_BENIGN_KILL_RE = re.compile(
+    r"\bcould\s+kill\s+for\b|\bkill\s+(?:time|the\s+(?:process|background|engine|lights|"
+    r"project|bug|server|connection|power|meeting))\b|\bkilled\s+(?:it|the\s+(?:bacteria|virus|"
+    r"plants|engine|project|bug|lights|server))\b|\bkilling\s+(?:me|it)\b",
     re.IGNORECASE,
 )
-REVIEW_SCORE = 0.6  # 0.5-0.9 = admin-review zone (comment stays visible)
+REVIEW_SCORE = 0.6
+NEUTRAL_CAP = 0.3
 
 
-def _context_guarded(text: str, start: int) -> bool:
-    """True if the match at `start` is quoted, negated, or meta-linguistic."""
-    for m in _QUOTE_RE.finditer(text):
-        if m.start() <= start < m.end():
-            return True
-    window = text[max(0, start - 60):start]
-    return bool(_NEG_RE.search(window) or _META_RE.search(window))
+def _quoted_spans(text):
+    return [(m.start(), m.end()) for m in _QUOTE_RE.finditer(text)]
 
 
-def _hit(text: str, rule: str) -> dict:
-    return {"text_length": len(text), "toxic": True, "score": 1.0,
+def _in_quotes(spans, start, end):
+    return any(a <= start and end <= b for a, b in spans)
+
+
+def _context(text, start, end, spans):
+    """'clear' = quoted+reported / meta / negated (exempt). 'ambiguous' = quoted
+    only (review). None = no exemption."""
+    if _NEG_RE.search(text[max(0, start - 40):start]):
+        return "clear"
+    window = text[max(0, start - 80): min(len(text), end + 40)]
+    if _in_quotes(spans, start, end):
+        return "clear" if _REPORT_RE.search(window) else "ambiguous"
+    if _REPORT_RE.search(window):
+        return "clear"
+    return None
+
+
+def _directed(text, start, end):
+    return bool(_YOU_RE.search(text[max(0, start - 25): min(len(text), end + 25)]))
+
+
+def _model_context(text, spans):
+    found = clear = amb = False
+    for rx in (_INSULT_LEX, _SLUR_RE):
+        for m in rx.finditer(text):
+            found = True
+            ctx = _context(text, m.start(), m.end(), spans)
+            if ctx == "clear":
+                clear = True
+            elif ctx == "ambiguous":
+                amb = True
+            else:
+                return None          # unguarded insult/slur -> let the model decide
+    for m in _EXPLETIVE_RE.finditer(text):
+        found = True
+        ctx = _context(text, m.start(), m.end(), spans)
+        if ctx == "clear":
+            clear = True
+        elif _directed(text, m.start(), m.end()):
+            return None              # directed expletive -> let the model decide
+        else:
+            clear = True             # untargeted frustration -> neutral signal
+    if _BENIGN_KILL_RE.search(text):
+        found = True
+        clear = True
+    if not found:
+        return None
+    return "clear" if clear else ("ambiguous" if amb else None)
+
+
+def _hit(text, rule, score=1.0):
+    return {"text_length": len(text), "toxic": True, "score": score,
             "label": "toxic", "matched_rule": rule}
+
+
+def _review(text, rule):
+    return {"text_length": len(text), "toxic": True, "score": REVIEW_SCORE,
+            "label": "toxic", "matched_rule": rule, "review": True}
 
 
 # --- De-obfuscation normalization (deterministic layers only) ---------------
@@ -231,10 +286,7 @@ def _file_ok(path: str, size: int, sha256: str) -> bool:
 def _download_verified(path: str, size: int, sha256: str) -> None:
     """Download `path` from the model-v3 release, verify size+sha, move into place."""
     url = RELEASE_BASE_URL + path
-    # Unique temp name: importing main.py starts a background download too, so
-    # during `python bake_model.py` two threads would otherwise race on the same
-    # "<path>.tmp" file and one os.replace would fail.
-    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    tmp_path = path + ".tmp"
     urllib.request.urlretrieve(url, tmp_path)
     got = os.path.getsize(tmp_path)
     if got != size:
@@ -332,7 +384,7 @@ load_model()
 def health() -> dict:
     return {
         "service": "content-moderation-model",
-        "version": "2.0.0 (DistilBERT v4 + context layers)",
+        "version": "2.1.0 (DistilBERT v4.1 + context layers)",
         "status": "ok" if (tokenizer is not None and session is not None) else "degraded",
         "tokenizer_loaded": tokenizer is not None,
         "model_loaded": session is not None,
@@ -347,56 +399,101 @@ def moderate(req: ModerateRequest) -> dict:
     text = req.text
     norm = _deobfuscate(text)
     aggressive = _deobfuscate_aggressive(norm)
+    spans = _quoted_spans(text)
+    review = False
 
-    # 0) Threat-intent layer (indirect threats need no profanity).
-    for variant in (text, norm):
-        if any(r.search(variant) for r in _THREAT_RES):
-            return {"text_length": len(text), "toxic": True, "score": 0.9,
-                    "label": "toxic", "matched_rule": "threat_pattern"}
+    def ctx_of(m):
+        return _context(text, m.start(), m.end(), spans)
 
-    # 1-2) Deterministic profanity + harassment, context-guarded on the
-    #      ORIGINAL text.
-    downgraded = False
-    orig_clean = True
-    for m in _PROFANITY_RE.finditer(text):
-        orig_clean = False
-        if _context_guarded(text, m.start()):
-            downgraded = True
-        else:
+    # 1) directed abuse + harassment (targeted at a person)
+    for rx in [_DIRECTED_RE] + _HARASSMENT_RES:
+        for m in rx.finditer(text):
+            c = ctx_of(m)
+            if c == "clear":
+                continue
+            if c == "ambiguous":
+                review = True
+                continue
+            return _hit(text, "harassment_pattern")
+
+    # 2) strong threats -> toxic
+    for rx in _THREAT_STRONG_RES:
+        for m in rx.finditer(text):
+            c = ctx_of(m)
+            if c == "clear":
+                continue
+            if c == "ambiguous":
+                review = True
+                continue
+            return _hit(text, "threat_pattern", 0.9)
+
+    # 3) weak threats -> review zone
+    for rx in _THREAT_WEAK_RES:
+        for m in rx.finditer(text):
+            if ctx_of(m) == "clear":
+                continue
+            review = True
+
+    # 4) slurs (person-directed)
+    for m in _SLUR_RE.finditer(text):
+        c = ctx_of(m)
+        if c == "clear":
+            continue
+        if c == "ambiguous":
+            review = True
+            continue
+        return _hit(text, "profanity_list")
+
+    # 5) expletives -- only abusive when directed
+    for m in _EXPLETIVE_RE.finditer(text):
+        c = ctx_of(m)
+        if c == "clear":
+            continue
+        if _directed(text, m.start(), m.end()):
             return _hit(text, "profanity_list")
-    for r in _HARASSMENT_RES:
-        for m in r.finditer(text):
-            orig_clean = False
-            if _context_guarded(text, m.start()):
-                downgraded = True
-            else:
-                return _hit(text, "harassment_pattern")
+        if c == "ambiguous":
+            review = True
 
-    # 3) Obfuscation check — only when the original text is otherwise clean,
-    #    so an obfuscated slur still blocks but a plain word is not re-caught.
-    if orig_clean:
+    # 6) obfuscation re-catch -- only when the original text was clean
+    orig_has = bool(
+        _DIRECTED_RE.search(text) or _SLUR_RE.search(text) or _EXPLETIVE_RE.search(text)
+        or any(rx.search(text) for rx in _HARASSMENT_RES)
+        or any(rx.search(text) for rx in _THREAT_STRONG_RES)
+        or any(rx.search(text) for rx in _THREAT_WEAK_RES)
+    )
+    if not orig_has:
         for variant in (norm, aggressive):
-            if _PROFANITY_RE.search(variant):
-                return _hit(text, "profanity_list")
-            if any(r.search(variant) for r in _HARASSMENT_RES):
+            if any(rx.search(variant) for rx in _THREAT_STRONG_RES):
+                return _hit(text, "threat_pattern", 0.9)
+            if _DIRECTED_RE.search(variant):
                 return _hit(text, "harassment_pattern")
+            if _SLUR_RE.search(variant):
+                return _hit(text, "profanity_list")
+            for m in _EXPLETIVE_RE.finditer(variant):
+                if _directed(variant, m.start(), m.end()):
+                    return _hit(text, "profanity_list")
 
+    # 7) model, with context guard
     if session is None or tokenizer is None:
-        raise HTTPException(status_code=503,
-                            detail=f"Model unavailable ({model_status}): {model_error}")
-
+        raise HTTPException(
+            status_code=503,
+            detail=f"Model unavailable ({model_status}): {model_error}",
+        )
     score = _predict(text)
-    # Model-side context guard: a denied or meta-discussed insult ("I am not
-    # calling you stupid", "the word idiot is being discussed") is capped to the
-    # review zone instead of a hard block.
-    if _INSULT_LEXICON.search(text) and (_DENIAL_RE.search(text) or _META_RE.search(text)):
-        downgraded = True
-    if downgraded:
-        score = min(score, REVIEW_SCORE)
-    return {"text_length": len(text), "toxic": score >= 0.5,
-            "score": round(score, 6),
-            "label": "toxic" if score >= 0.5 else "neutral",
-            "review": bool(downgraded)}
+    mctx = _model_context(text, spans)
+    if mctx == "clear":
+        score = min(score, NEUTRAL_CAP)
+    elif mctx == "ambiguous":
+        review = True
+    if review:
+        score = REVIEW_SCORE        # ambiguous -> review zone, never auto-hidden
+    return {
+        "text_length": len(text),
+        "toxic": score >= 0.5,
+        "score": round(score, 6),
+        "label": "toxic" if score >= 0.5 else "neutral",
+        "review": bool(review),
+    }
 
 
 if __name__ == "__main__":
