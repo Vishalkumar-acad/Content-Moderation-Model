@@ -88,12 +88,15 @@ _SLUR_RE = re.compile(
 # Expletives / intensifiers: abusive only when directed at a person
 # ("fuck you"), not as a filler ("this fucking traffic").
 _EXPLETIVE_RE = re.compile(
-    r"\b(?:fuck|fucked|fucker|fuckers|fucking|shit|shits|shitty|bullshit|horseshit|crap)\b",
+    r"\b(?:fuck|fucked|fucker|fuckers|fucking|shit|shits|shitty|bullshit|horseshit|crap|"
+    r"hell|damn|darn|bloody|heck|freaking)\b",
     re.IGNORECASE,
 )
 # Constructions that are always directed abuse.
 _DIRECTED_RE = re.compile(
-    r"\bfuck\s+(?:you|u|off)\b|\bshut\s+(?:the\s+fuck\s+)?up\b|\bstfu\b",
+    r"\bfuck\s+(?:you|u|off)\b|\bshut\s+(?:the\s+fuck\s+)?up\b|\bstfu\b|"
+    r"\b(?:fuck|fucking|shit|shitty|bullshit)\s+(?:ridiculous|stupid|absurd|awful|useless|"
+    r"pathetic|horrible|garbage|nonsense|joke)\b",
     re.IGNORECASE,
 )
 _HARASSMENT_RES = [
@@ -146,7 +149,8 @@ _NEG_RE = re.compile(r"\b(?:not|never|no|n't|without|nor|neither)\b", re.IGNOREC
 _REPORT_RE = re.compile(
     r"\b(?:the\s+word|the\s+term|called|calling|says?|said|saying|wrote|writing|quoting|"
     r"quote[ds]?|report(?:ed|s|ing)?|discuss(?:ed|ing)?|example\s+of|mention(?:ed|ing|s)?|"
-    r"slurs?|evidence|according\s+to)\b",
+    r"slurs?|evidence|according\s+to|shouted|yelled|screamed|posted|phrases?|explaining|"
+    r"analyzing|analysing|describing|described|read)\b",
     re.IGNORECASE,
 )
 _YOU_RE = re.compile(r"\b(?:you|u|your|ur|you'?re|yourself|urself|yours)\b", re.IGNORECASE)
