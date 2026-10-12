@@ -10,8 +10,8 @@ v4 pipeline (DistilBERT deep learning + context layers):
 
 The model (67 MB), tokenizer.json and tokenizer_config.json are shipped as
 GitHub release assets (model-v4). On startup every file is verified against
-its sha256; anything missing, truncated or stale (e.g. an old v3 copy) is
-re-downloaded automatically — the 67 MB model in a background
+its exact size and sha256; anything missing, truncated or stale (e.g. an old
+v3 copy) is re-downloaded automatically — the 67 MB model in a background
 thread, so the web server binds its port immediately and Render's health
 check passes even while the download is in flight. /moderate returns 503
 until the model finishes loading.
@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("content-moderation")
 
 MODEL_PATH = "distilbert_moderation_v4_int8.onnx"
-MODEL_SIZE = 67_362_849  # exact bytes of the v4 int8 ONNX
+MODEL_SIZE = 67_362_849
 MODEL_SHA256 = "715ad02d9ea23de95360e5f0b18377a5a029414fa81c4e8ff7d30365abd7d69a"
 TOKENIZER_PATH = "tokenizer.json"
 TOKENIZER_SIZE = 711_661
@@ -217,10 +217,10 @@ class ModerateRequest(BaseModel):
     text: str = Field(..., min_length=0, max_length=20000)
 
 
-def _file_ok(path: str, sha256: str, size: int | None = None) -> bool:
-    """True only if the local file exists and its sha256 matches (size optional)."""
+def _file_ok(path: str, size: int, sha256: str) -> bool:
+    """True only if the local file exists with the exact size and sha256."""
     try:
-        if size is not None and os.path.getsize(path) != size:
+        if os.path.getsize(path) != size:
             return False
         with open(path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest() == sha256
@@ -228,13 +228,16 @@ def _file_ok(path: str, sha256: str, size: int | None = None) -> bool:
         return False
 
 
-def _download_verified(path: str, sha256: str, size: int | None = None) -> None:
-    """Download `path` from the model-v4 release, verify sha256 (+size if given)."""
+def _download_verified(path: str, size: int, sha256: str) -> None:
+    """Download `path` from the model-v3 release, verify size+sha, move into place."""
     url = RELEASE_BASE_URL + path
-    tmp_path = path + ".tmp"
+    # Unique temp name: importing main.py starts a background download too, so
+    # during `python bake_model.py` two threads would otherwise race on the same
+    # "<path>.tmp" file and one os.replace would fail.
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     urllib.request.urlretrieve(url, tmp_path)
     got = os.path.getsize(tmp_path)
-    if size is not None and got != size:
+    if got != size:
         raise RuntimeError(f"downloaded {path} is {got} bytes, expected {size}")
     with open(tmp_path, "rb") as f:
         digest = hashlib.sha256(f.read()).hexdigest()
@@ -277,14 +280,14 @@ def _ensure_and_load() -> None:
     model_status = "downloading"
     try:
         files = [
-            (TOKENIZER_CONFIG_PATH, TOKENIZER_CONFIG_SHA256, TOKENIZER_CONFIG_SIZE),
-            (TOKENIZER_PATH, TOKENIZER_SHA256, TOKENIZER_SIZE),
-            (MODEL_PATH, MODEL_SHA256, MODEL_SIZE),
+            (TOKENIZER_CONFIG_PATH, TOKENIZER_CONFIG_SIZE, TOKENIZER_CONFIG_SHA256),
+            (TOKENIZER_PATH, TOKENIZER_SIZE, TOKENIZER_SHA256),
+            (MODEL_PATH, MODEL_SIZE, MODEL_SHA256),
         ]
-        for path, sha, size in files:
-            if not _file_ok(path, sha, size):
-                log.info("Fetching %s from model-v4 release...", path)
-                _download_verified(path, sha, size)
+        for path, size, sha in files:
+            if not _file_ok(path, size, sha):
+                log.info("Fetching %s from model-v3 release (%d bytes)...", path, size)
+                _download_verified(path, size, sha)
                 log.info("%s downloaded and verified (sha256 ok).", path)
         if _try_load_all():
             model_status = "ok"
@@ -299,9 +302,9 @@ def _ensure_and_load() -> None:
 def load_model() -> None:
     global model_status
     files_ok = all([
-        _file_ok(TOKENIZER_CONFIG_PATH, TOKENIZER_CONFIG_SHA256, TOKENIZER_CONFIG_SIZE),
-        _file_ok(TOKENIZER_PATH, TOKENIZER_SHA256, TOKENIZER_SIZE),
-        _file_ok(MODEL_PATH, MODEL_SHA256, MODEL_SIZE),
+        _file_ok(TOKENIZER_CONFIG_PATH, TOKENIZER_CONFIG_SIZE, TOKENIZER_CONFIG_SHA256),
+        _file_ok(TOKENIZER_PATH, TOKENIZER_SIZE, TOKENIZER_SHA256),
+        _file_ok(MODEL_PATH, MODEL_SIZE, MODEL_SHA256),
     ])
     if files_ok and _try_load_all():
         model_status = "ok"
